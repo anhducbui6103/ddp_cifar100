@@ -1,4 +1,0 @@
-Run,World Size,Local Batch,Global Batch,LR,Total Time (s),Best Val Acc
-baseline,1,16,16,0.0001,9331.24,0.249
-lr_scaled,1,32,32,0.0002,8071.53,0.2038
-no_lr_scale,1,32,32,0.0001,8145.47,0.2858

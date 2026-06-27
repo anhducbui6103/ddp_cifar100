@@ -1,17 +1,19 @@
 """
-PyTorch DDP utilities for scaling experiments.
-Designed for Kaggle (2x T4) with mp.spawn — no torchrun required.
+PyTorch DDP utilities for scaling experiments on Kaggle (2x T4).
+Uses mp.spawn — no torchrun required. All paths are fixed to /kaggle/working.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import timm
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -22,7 +24,143 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, transforms
-import timm
+
+# ---------------------------------------------------------------------------
+# Kaggle path constants (hardcoded — no Colab /content auto-detection)
+# ---------------------------------------------------------------------------
+KAGGLE_WORKING_DIR = "/kaggle/working"
+KAGGLE_RESULTS_DIR = "/kaggle/working/results"
+KAGGLE_DOWNLOAD_DIR = "/kaggle/working/results_GOM_VE"
+KAGGLE_DATA_DIR = "/kaggle/working/data"
+
+
+def ensure_kaggle_dirs() -> dict[str, Path]:
+    """Create standard Kaggle working directories and return them as Path objects."""
+    dirs = {
+        "work": Path(KAGGLE_WORKING_DIR),
+        "results": Path(KAGGLE_RESULTS_DIR),
+        "download": Path(KAGGLE_DOWNLOAD_DIR),
+        "data": Path(KAGGLE_DATA_DIR),
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def download_and_sync_guide(world_size: int) -> None:
+    """
+    Print step-by-step instructions for downloading Kaggle outputs
+    and syncing them to Google Drive (manual upload — Kaggle has no Drive mount).
+    """
+    tag = f"{world_size}gpu"
+    download_dir = Path(KAGGLE_DOWNLOAD_DIR)
+    results_dir = Path(KAGGLE_RESULTS_DIR)
+
+    summary_csv = download_dir / f"pipeline_summary_{tag}.csv"
+    files_in_download = sorted(p.name for p in download_dir.iterdir() if p.is_file())
+    files_in_results = sorted(p.name for p in results_dir.iterdir() if p.is_file())
+
+    border = "=" * 72
+    star = "*" * 72
+    print(star)
+    print("*" + " " * 16 + "CẨM NANG CỨU HỘ — TẢI KẾT QUẢ KAGGLE" + " " * 16 + "*")
+    print(star)
+    print()
+    print("⚠  BỐI CẢNH QUAN TRỌNG")
+    print("   Kaggle KHÔNG hỗ trợ mount Google Drive (google.colab.drive → NotImplementedError).")
+    print("   Toàn bộ kết quả đã được GOM vào thư mục:")
+    print(f"   → {download_dir.resolve()}")
+    print("   Bạn PHẢI Download thủ công trước khi tắt session (dữ liệu /kaggle/working sẽ MẤT).")
+    print()
+    print(border)
+    print("  BƯỚC 1 — REFRESH CỘT OUTPUT TRÊN KAGGLE")
+    print(border)
+    print("  1. Nhìn sang cột bên PHẢI màn hình Kaggle, bấm tab « Output » (biểu tượng 📁).")
+    print("  2. Bấm nút Refresh (↻) để cập nhật danh sách file mới nhất.")
+    print("  3. Tìm và mở thư mục: results_GOM_VE/")
+    print("  4. Xác nhận thấy các file: .pt, .json, .csv (danh sách bên dưới).")
+    print()
+    print(border)
+    print("  BƯỚC 2 — DOWNLOAD VỀ MÁY TÍNH")
+    print(border)
+    print("  1. Trong results_GOM_VE/, bấm nút Download (⬇) trên từng file HOẶC tải cả thư mục.")
+    print(f"  2. File CSV tóm tắt chính: pipeline_summary_{tag}.csv")
+    print("  3. Checkpoint mô hình: pipeline_*_model.pt")
+    print("  4. Log huấn luyện: pipeline_*_metrics.json, pipeline_*_history.json")
+    print()
+    print(border)
+    print("  BƯỚC 3 — UPLOAD LÊN GOOGLE DRIVE")
+    print(border)
+    print("  1. Mở https://drive.google.com")
+    print("  2. Tạo thư mục: DDP_Experiments/")
+    print(f"  3. Tạo subfolder: DDP_Experiments/{tag}/")
+    print("  4. Kéo-thả TOÀN BỘ file đã tải từ results_GOM_VE/ vào subfolder đó.")
+    print("  5. KHÔNG đổi tên file — giữ nguyên để đối chiếu giữa các lần chạy.")
+    print()
+    print(border)
+    print("  BƯỚC 4 — CHIA SẺ GIỮA 2 NOTEBOOK (tuỳ chọn)")
+    print(border)
+    print("  Để so sánh Speedup 1 GPU ↔ 2 GPU DDP:")
+    print(f"  1. Zip nội dung results_GOM_VE/ sau khi chạy notebook {tag}.")
+    print(f"  2. Tạo Kaggle Dataset: ddp-pipeline-{tag}")
+    print("  3. Add Dataset làm Input vào notebook còn lại.")
+    print()
+    print(border)
+    print(f"  KIỂM TRA — results_GOM_VE/ ({len(files_in_download)} file)")
+    print(border)
+    for i, name in enumerate(files_in_download, start=1):
+        full = download_dir / name
+        marker = " ← CSV tóm tắt" if name == summary_csv.name else ""
+        print(f"  {i:2d}. {full.resolve()}{marker}")
+    if not files_in_download:
+        print("  (Chưa có file — hãy chạy Cell 5 trước!)")
+    print()
+    print(border)
+    print(f"  KIỂM TRA — results/ gốc ({len(files_in_results)} file)")
+    print(border)
+    for i, name in enumerate(files_in_results, start=1):
+        print(f"  {i:2d}. {(results_dir / name).resolve()}")
+    if not files_in_results:
+        print("  (Chưa có file — hãy chạy Cell 4 trước!)")
+    print()
+    print(star)
+    print("*" + " " * 10 + "NHỚ: Download results_GOM_VE TRƯỚC KHI ĐÓNG NOTEBOOK!" + " " * 10 + "*")
+    print(star)
+
+
+def copy_to_download_dir(src: Path, download_dir: Path | None = None) -> Path:
+    """Copy a single file into results_GOM_VE for easy Kaggle Output download."""
+    dest_root = download_dir or Path(KAGGLE_DOWNLOAD_DIR)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    dest = dest_root / src.name
+    shutil.copy2(src, dest)
+    return dest
+
+
+def sync_all_results_to_download_dir(
+    results_dir: Path | str | None = None,
+    download_dir: Path | str | None = None,
+) -> list[Path]:
+    """
+    Copy every file from results/ into results_GOM_VE/.
+    Returns sorted list of absolute destination paths.
+    """
+    src_root = Path(results_dir or KAGGLE_RESULTS_DIR)
+    dest_root = Path(download_dir or KAGGLE_DOWNLOAD_DIR)
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    if not src_root.exists():
+        raise FileNotFoundError(f"Thư mục nguồn không tồn tại: {src_root.resolve()}")
+
+    copied: list[Path] = []
+    for src in sorted(src_root.iterdir()):
+        if not src.is_file():
+            continue
+        dest = dest_root / src.name
+        shutil.copy2(src, dest)
+        copied.append(dest.resolve())
+
+    return copied
 
 
 @dataclass
@@ -38,7 +176,7 @@ class TrainConfig:
     model_name: str = "vit_large_patch16_224"
     num_classes: int = 100
     image_size: int = 224
-    save_dir: str = "/kaggle/working/results"
+    save_dir: str = KAGGLE_RESULTS_DIR
     seed: int = 42
     use_amp: bool = True
     warmup_epochs: int = 1
@@ -96,7 +234,7 @@ def build_dataloaders(
     config: TrainConfig,
     rank: int,
     world_size: int,
-    data_root: str = "/kaggle/working/data",
+    data_root: str = KAGGLE_DATA_DIR,
 ):
     train_ds = datasets.CIFAR100(
         root=data_root,
@@ -238,7 +376,6 @@ def _train_worker(rank: int, world_size: int, config: TrainConfig, shared: dict)
         "epoch_time_sec": [],
     }
 
-    # Synchronize before timing
     if is_ddp:
         dist.barrier()
     start = time.perf_counter()
@@ -309,6 +446,10 @@ def _train_worker(rank: int, world_size: int, config: TrainConfig, shared: dict)
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
 
+        print(f"  Saved checkpoint : {ckpt_path}")
+        print(f"  Saved metrics    : {metrics_path}")
+        print(f"  Saved history    : {history_path}")
+
     if is_ddp:
         cleanup_ddp()
 
@@ -360,7 +501,7 @@ def theoretical_amdahl_speedup(parallel_fraction: float, num_gpus: int) -> float
 
 
 def load_shared_result(exp_name: str, search_dirs: list[str | Path]) -> dict[str, Any] | None:
-    """Load metrics + history exported by another notebook (via Kaggle Dataset / Drive)."""
+    """Load metrics + history exported by another notebook (via Kaggle Dataset)."""
     for base in search_dirs:
         base = Path(base)
         metrics_path = base / f"{exp_name}_metrics.json"
@@ -376,23 +517,13 @@ def load_shared_result(exp_name: str, search_dirs: list[str | Path]) -> dict[str
     return None
 
 
-def backup_result(result: dict[str, Any], exp_name: str, results_dir: Path, drive_path: Path) -> None:
-    """Copy metrics, history, and checkpoint to drive_backup for team sharing."""
-    import shutil
-
-    for suffix in ("_metrics.json", "_history.json", "_model.pt"):
-        src = results_dir / f"{exp_name}{suffix}"
-        if src.exists():
-            shutil.copy(src, drive_path / src.name)
-
-
 def get_pipeline_configs(
     world_size: int,
     *,
     base_lr: float = 1e-4,
     local_batch: int = 16,
     epochs: int = 5,
-    save_dir: str = "/kaggle/working/results",
+    save_dir: str = KAGGLE_RESULTS_DIR,
 ) -> list[TrainConfig]:
     """
     Cùng một pipeline 3 bước cho cả 1 GPU và 2 GPU DDP.

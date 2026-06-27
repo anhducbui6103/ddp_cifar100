@@ -1,0 +1,13 @@
+{
+  "exp_name": "pipeline_baseline_2gpu",
+  "world_size": 2,
+  "local_batch_size": 16,
+  "global_batch_size": 32,
+  "learning_rate": 0.0001,
+  "epochs": 5,
+  "total_time_sec": 5145.036603145,
+  "avg_epoch_time_sec": 1023.5630022168,
+  "final_val_acc": 0.2772,
+  "best_val_acc": 0.2772,
+  "checkpoint": "/kaggle/working/results/pipeline_baseline_2gpu_model.pt"
+}
