@@ -1,127 +1,154 @@
-# PyTorch DDP CIFAR-100 Benchmark
+# Phân tích hiệu năng và Scaling của PyTorch DDP
 
-Project cho Đề tài 3: phân tích hiệu năng và khả năng mở rộng của PyTorch Distributed Data Parallel trên CIFAR-100.
+Hai notebook chạy **cùng một pipeline hoàn chỉnh**, chỉ khác `WORLD_SIZE` (1 GPU vs 2 GPU DDP).
 
-## 1. Cài thư viện
+Mỗi notebook **nhúng sẵn** toàn bộ code `ddp_utils` — cell Bước 0 ghi ra `ddp_utils.py` rồi import (bắt buộc cho DDP/`mp.spawn` trên Colab).
 
-```bash
-pip install -r requirements.txt
+## Hai notebook — cùng pipeline
+
+| File | GPU | Dòng duy nhất khác biệt |
+|------|-----|------------------------|
+| `pipeline_1gpu.ipynb` | 1 GPU | `WORLD_SIZE = 1` |
+| `pipeline_2gpu_ddp.ipynb` | 2 GPU DDP | `WORLD_SIZE = 2` |
+
+### Pipeline (7 bước, giống nhau 100%)
+
+```
+Bước 0  → Ghi + import ddp_utils (cell nhúng) + setup đường dẫn/GPU
+Bước 1–3 → Huấn luyện 3 runs: baseline → lr_scaled → no_lr_scale
+Bước 4  → Bảng tổng hợp thời gian & accuracy
+Bước 5  → Biểu đồ Linear LR Scaling
+Bước 6  → Speedup & Amdahl (load kết quả notebook còn lại)
+Bước 7  → Kết luận
 ```
 
-## 2. Cấu hình khuyên dùng
+### Ý nghĩa 3 runs (tương đương giữa 2 notebook)
 
-Nếu muốn chạy nhanh và ít lỗi:
+| Run | 1 GPU (`WORLD_SIZE=1`) | 2 GPU DDP (`WORLD_SIZE=2`) |
+|-----|------------------------|----------------------------|
+| **baseline** | global bs=16, lr=1e-4 | global bs=32, lr=1e-4 |
+| **lr_scaled** | global bs=32, lr=2e-4 | global bs=32, lr=2e-4 |
+| **no_lr_scale** | global bs=32, lr=1e-4 | = baseline (tái sử dụng, không train lại) |
 
-```text
-Model: resnet50
-Epochs: 5
-Image size: 224
-Batch size: 64 nếu đủ VRAM, nếu OOM thì giảm xuống 32
+> Trên 2 GPU, `no_lr_scale` trùng cấu hình `baseline` nên notebook tự bỏ qua lần train thừa.
+
+## Chia việc nhóm 4 người
+
+| Nhóm | Notebook | GPU | Nhiệm vụ |
+|------|----------|-----|----------|
+| Team A (2 người) | `pipeline_1gpu.ipynb` | ×1 | Chạy pipeline 1 GPU |
+| Team B (2 người) | `pipeline_2gpu_ddp.ipynb` | **×2** (bắt buộc) | Chạy pipeline 2 GPU DDP |
+
+Hai team có thể **chạy song song**. Sau đó trao đổi kết quả để hoàn thành Bước 6 (Speedup/Amdahl).
+
+## Cấu trúc dự án
+
+```
+pytorch-ddp-scaling-analysis/
+├── pipeline_1gpu.ipynb        # Pipeline hoàn chỉnh — 1 GPU (ddp_utils nhúng trong cell)
+├── pipeline_2gpu_ddp.ipynb    # Pipeline hoàn chỉnh — 2 GPU DDP (ddp_utils nhúng trong cell)
+├── ddp_utils.py               # Bản gốc module (đồng bộ với cell ddp_utils trong notebook)
+├── requirements.txt
+└── README.md
 ```
 
-Nếu muốn báo cáo đẹp hơn:
+> Khi sửa logic DDP, cập nhật `ddp_utils.py` trong repo rồi đồng bộ lại cell `ddp_utils` trong cả 2 notebook.
 
-```text
-Model: convnext_tiny
-Epochs: 5 hoặc 10
-Image size: 224
-Batch size: 32 hoặc 64
+## Hướng dẫn chạy trên Google Colab
+
+### Chuẩn bị
+
+1. Upload notebook tương ứng (`pipeline_1gpu.ipynb` hoặc `pipeline_2gpu_ddp.ipynb`)
+2. **Runtime → Change runtime type → GPU**
+   - Notebook 1 GPU: T4 ×1 là đủ
+   - Notebook 2 GPU: cần **2 GPU** (Colab Pro/Pro+ hoặc máy có đủ GPU)
+
+### Chạy
+
+1. **Run All** (hoặc chạy tuần tự từ đầu)
+2. Cell `ddp_utils` tự ghi `ddp_utils.py` và import — **không cần upload file thủ công**
+3. Kết quả lưu tại `/content/results/` và bản sao tại `/content/drive_backup/`
+
+### Đối chiếu Speedup (Bước 6) trên Colab
+
+Sau khi team kia chạy xong, copy các file `pipeline_baseline_*gpu_metrics.json` (và `_history.json` nếu có) vào:
+
+| Notebook | Đường dẫn chứa kết quả team kia |
+|----------|----------------------------------|
+| `pipeline_1gpu.ipynb` | `/content/shared/ddp-pipeline-2gpu/` |
+| `pipeline_2gpu_ddp.ipynb` | `/content/shared/ddp-pipeline-1gpu/` |
+
+Tạo thư mục và upload file, rồi chạy lại cell Bước 6.
+
+**Gợi ý:** mount Google Drive để chia sẻ `drive_backup/` giữa 2 team:
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+# copy drive_backup/ vào /content/shared/...
 ```
 
-## 3. Chạy baseline 1 GPU
+## Hướng dẫn chạy trên Kaggle (tùy chọn)
 
-```bash
-python train_single.py \
-  --run_name single_gpu \
-  --model resnet50 \
-  --epochs 5 \
-  --batch_size 64 \
-  --lr 1e-4
-```
+### Chuẩn bị
 
-## 4. Chạy DDP 2 GPU, fixed local batch size
+1. Upload notebook tương ứng
+2. Settings → **Internet: On**
 
-Mỗi GPU batch 64, global batch = 128. Learning rate scale tuyến tính từ `1e-4` lên `2e-4`.
+### Team A — `pipeline_1gpu.ipynb`
 
-```bash
-torchrun --nproc_per_node=2 train_ddp.py \
-  --run_name ddp_2gpu_fixed_local \
-  --model resnet50 \
-  --epochs 5 \
-  --batch_size 64 \
-  --lr 2e-4
-```
+- Accelerator: GPU (×1 là đủ)
+- **Run All**
+- Upload `drive_backup/` lên dataset `ddp-pipeline-1gpu`
 
-## 5. Chạy DDP 2 GPU, fixed global batch size
+### Team B — `pipeline_2gpu_ddp.ipynb`
 
-Mỗi GPU batch 32, global batch = 64. Learning rate giữ nguyên `1e-4`.
+- Accelerator: **GPU T4 ×2** (bắt buộc)
+- **Run All**
+- Upload `drive_backup/` lên dataset `ddp-pipeline-2gpu`
 
-```bash
-torchrun --nproc_per_node=2 train_ddp.py \
-  --run_name ddp_2gpu_fixed_global \
-  --model resnet50 \
-  --epochs 5 \
-  --batch_size 32 \
-  --lr 1e-4
-```
+### Đối chiếu Speedup (Bước 6) trên Kaggle
 
-## 6. Tổng hợp kết quả
+Trong mỗi notebook, **Add Input** dataset của team kia:
 
-Sau khi chạy xong các thí nghiệm:
+| Notebook | Add Input |
+|----------|-----------|
+| `pipeline_1gpu.ipynb` | `ddp-pipeline-2gpu` |
+| `pipeline_2gpu_ddp.ipynb` | `ddp-pipeline-1gpu` |
 
-```bash
-python benchmark.py --results_dir ./results --baseline_csv single_gpu.csv
-```
+Chạy lại cell Bước 6 → có biểu đồ Amdahl và speedup.
 
-Script sẽ tạo:
+## Output mỗi notebook
 
-```text
-results/summary.csv
-figures/speedup.png
-figures/throughput.png
-```
+| File | Mô tả |
+|------|-------|
+| `pipeline_baseline_{N}gpu_*` | Kết quả run baseline |
+| `pipeline_lr_scaled_{N}gpu_*` | Kết quả LR ×2 |
+| `pipeline_summary_{N}gpu.csv` | Bảng tổng hợp |
+| `lr_scaling_{N}gpu.png` | Biểu đồ accuracy |
+| `amdahl_analysis.png` | Speedup & Amdahl (sau khi có cả 2) |
+| `amdahl_report.json` | Số liệu speedup |
 
-## 7. Nếu bị CUDA out of memory
+## Tham số mặc định (đồng bộ giữa 2 team)
 
-Giảm batch size:
+| Tham số | Giá trị |
+|---------|---------|
+| `LOCAL_BATCH` | 16 |
+| `BASE_LR` | 1e-4 |
+| `EPOCHS` | 5 |
+| `model_name` | vit_large_patch16_224 |
 
-```bash
---batch_size 32
-```
+## Xử lý lỗi
 
-Hoặc giảm image size:
+| Lỗi | Cách xử lý |
+|-----|------------|
+| `CUDA OOM` | Giảm `LOCAL_BATCH` xuống 8 |
+| `Can't get attribute '_train_worker'` | Chạy lại cell `ddp_utils` (Bước 0) — DDP cần worker trong file `.py`, không chạy inline trong notebook |
+| `NameError: run_training` | Chạy lại cell `ddp_utils` trước cell huấn luyện |
+| 2 GPU notebook báo thiếu GPU | Colab: đổi runtime sang 2 GPU; Kaggle: Settings → T4 ×2 |
+| Bước 6 không có speedup | Copy/upload kết quả `drive_backup/` của team kia |
 
-```bash
---image_size 160
-```
+## Tài liệu tham khảo
 
-Nhưng nếu dùng image size 160, nhớ ghi rõ trong báo cáo rằng nhóm giảm kích thước ảnh để phù hợp giới hạn VRAM.
-
-## 8. Các metric chính để đưa vào báo cáo
-
-- Time per epoch
-- Throughput, images/sec
-- Speedup = time 1 GPU / time N GPU
-- Efficiency = speedup / số GPU
-- Peak GPU memory
-- Top-1 accuracy
-
-## 9. Công thức Amdahl
-
-```text
-Speedup(N) = 1 / ((1 - P) + P / N)
-```
-
-Trong đó:
-
-- N là số GPU.
-- P là phần chương trình có thể song song hóa.
-- 1 - P là phần không song song hóa được.
-
-Ví dụ với P = 0.9 và N = 2:
-
-```text
-Speedup = 1 / (0.1 + 0.9 / 2) = 1.82x
-```
-
-Thực tế thường thấp hơn do overhead đồng bộ gradient, truyền dữ liệu giữa GPU, DataLoader, và kích thước dataset nhỏ.
+- [PyTorch DDP Tutorial](https://pytorch.org/tutorials/intermediate/ddp_tutorial.html)
+- [Linear LR Scaling (Goyal et al.)](https://arxiv.org/abs/1706.02677)
